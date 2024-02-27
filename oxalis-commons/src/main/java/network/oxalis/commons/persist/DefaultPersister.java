@@ -41,6 +41,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.X509Certificate;
 
 /**
  * @author erlend
@@ -78,17 +80,30 @@ public class DefaultPersister implements PersisterHandler {
 
     @Override
     public void persist(InboundMetadata inboundMetadata, Path payloadPath) throws IOException {
-        Path path = PersisterUtils.createArtifactFolders(inboundFolder, inboundMetadata.getHeader()).resolve(
-                String.format("%s.receipt.dat",
-                        FileUtils.filterString(inboundMetadata.getTransmissionIdentifier().getIdentifier())));
+        String transmissionIdentifier = inboundMetadata.getTransmissionIdentifier().getIdentifier();
+        String filteredTransmissionIdentifier = FileUtils.filterString(transmissionIdentifier);
+        Path directory = PersisterUtils.createArtifactFolders(inboundFolder, inboundMetadata.getHeader());
 
-        try (OutputStream outputStream = Files.newOutputStream(path)) {
+        String receiptFileName = String.format("%s.receipt.dat", filteredTransmissionIdentifier);
+        Path receiptPath = directory.resolve(receiptFileName);
+
+        try (OutputStream outputStream = Files.newOutputStream(receiptPath)) {
             evidenceFactory.write(outputStream, inboundMetadata);
         } catch (EvidenceException e) {
             throw new IOException("Unable to persist receipt.", e);
         }
 
-        log.debug("Receipt persisted to: {}", path);
+        String certificateFileName = String.format("%s.sender.dat", filteredTransmissionIdentifier);
+        Path certificatePath = directory.resolve(certificateFileName);
+
+        try (OutputStream outputStream = Files.newOutputStream(certificatePath)) {
+            X509Certificate certificate = inboundMetadata.getCertificate();
+            outputStream.write(certificate.getEncoded());
+        } catch (CertificateEncodingException | IOException e) {
+            log.error("Unable to persist certificate to: {}.", certificatePath, e);
+        }
+
+        log.debug("Receipt persisted to: {}", receiptPath);
     }
 
     /**
