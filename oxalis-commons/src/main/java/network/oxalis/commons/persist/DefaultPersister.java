@@ -33,16 +33,21 @@ import network.oxalis.api.model.TransmissionIdentifier;
 import network.oxalis.api.persist.PersisterHandler;
 import network.oxalis.api.util.Type;
 import network.oxalis.commons.filesystem.FileUtils;
+import network.oxalis.commons.security.CertificateUtils;
 import network.oxalis.vefa.peppol.common.model.Header;
 
 import javax.inject.Singleton;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 
 /**
  * @author erlend
@@ -52,6 +57,8 @@ import java.security.cert.X509Certificate;
 @Singleton
 @Type("default")
 public class DefaultPersister implements PersisterHandler {
+
+    private static final String NOTIFICATION_URL = "http://localhost:42069/notification/incoming";
 
     private final EvidenceFactory evidenceFactory;
 
@@ -93,17 +100,47 @@ public class DefaultPersister implements PersisterHandler {
             throw new IOException("Unable to persist receipt.", e);
         }
 
-        String certificateFileName = String.format("%s.sender.dat", filteredTransmissionIdentifier);
-        Path certificatePath = directory.resolve(certificateFileName);
-
-        try (OutputStream outputStream = Files.newOutputStream(certificatePath)) {
-            X509Certificate certificate = inboundMetadata.getCertificate();
-            outputStream.write(certificate.getEncoded());
-        } catch (CertificateEncodingException | IOException e) {
-            log.error("Unable to persist certificate to: {}.", certificatePath, e);
-        }
-
         log.debug("Receipt persisted to: {}", receiptPath);
+
+        var url = new URL(NOTIFICATION_URL);
+        HttpURLConnection connection = null;
+
+        try {
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setDoOutput(true);
+
+            X509Certificate certificate = inboundMetadata.getCertificate();
+
+            var formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSX");
+            var date = inboundMetadata.getTimestamp().toInstant().atOffset(ZoneOffset.UTC).format(formatter);
+
+            var json = String.format(
+                    "{\"path\":\"%s\", \"timestamp\": \"%s\", \"cert_name\": \"%s\"}",
+                    payloadPath.toString(),
+                    date,
+                    CertificateUtils
+                            .extractCommonName(certificate)
+                            .replace("\"", "\\\"")
+                            .replace("\r", "\\r")
+                            .replace("\n", "\\n")
+            );
+
+            try (OutputStream os = connection.getOutputStream()) {
+                os.write(json.getBytes(StandardCharsets.UTF_8));
+            }
+
+            if (connection.getResponseCode() != 200) {
+                log.error("Unable to send notification to: {}.", url);
+            }
+        } catch (Exception e) {
+            log.error("Unable to send notification to: {}.", url, e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
     }
 
     /**
